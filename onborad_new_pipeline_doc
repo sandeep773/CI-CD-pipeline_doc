@@ -1,0 +1,113 @@
+Pre-Requisites:
+
+Service-Name: You need to have a consistent service name, which is used throughout the process. We represent it as <service-name> throughout the document. 
+Eg. fraud-detection-service.
+
+Health Check Endpoint: /health-check
+App Port: 8080
+Log File Location: /var/log/<service-name> - The log file name doesn’t matter. All the logs present here will be tailed and sent to Graylog.
+Logrotate logic should be handled in the application. There will be a default logrotate policy which runs daily, but it is encouraged to have log rotation by the application itself. 
+
+Code Changes in Project for CI/CD - Refer PR (Java Spring Boot Project): https://bitbucket.org/swigy/fraud-detection-service/pull-requests/2/adds-ci-cd-changes/diff
+
+
+High Level Steps
+Make the Service Properties Configurable
+Adding Config Values to Consul
+Build - Creating Jenkins Build Pipeline for Service (uses Debian Package)
+Launch - Instances (only required the first time)
+Deploy - Job for Service
+Adding Service to Kong
+
+Make the Service Properties Configurable
+Create application.properties (in src/main/resources) and copy all the relevant properties for the service there. Once done, you can replace the actual values with placeholders. 
+Eg. A property delivery.mobileNoApi.host=http://de-api.swiggy.com should be converted to delivery.mobileNoApi.host=${DELIVERY_MOBILENO_API_HOST} 
+
+The values for these placeholders would be populated in the next step. 
+
+Adding Config Values to Consul
+Open http://consul-prod.swiggyops.de/ui/swiggy-aws/kv/config/ 
+First step is to create a folder for your service. Once folder is created, you can put key-value pairs for the placeholders. 
+
+For creating a folder, click “CREATE”, and then add <service-name>/ (with a forward slash at the end, indicating a folder)
+
+If your application needs command line arguments to run , create a key - JAVA_ARGS
+And add arguments as value.
+Eg - Key - JAVA_ARGS
+        Value -  “-Dspring.profiles.active=default”
+Once folder is created, go inside the folder, and add key-value pairs one by one using CREATE option. Note that key should not end with a / (forward slash), otherwise it would be treated as another folder. 
+
+Once this is done for all the placeholders, this step is complete.
+
+Creating Jenkins Build Pipeline for Service (uses Debian Package)
+This step creates a Jenkins Pipeline for your service. 
+
+Open http://jenkins.swiggy.co:8080/ . We need to create a new Build Pipeline. Click on “New Item” from the left-hand-side menu. You need to fill 2 this on this page:
+
+Name: The name of the pipeline should be build-<service-name>
+We also need to create a template for the Jenkins Job - You can Copy this from fraud-detection-service. (Search for build-fraud-detection-service in the search box at the bottom of the page. ) and then Click OK. 
+
+In the next Page, Uncheck Poll SCM option. Also, edit the pipeline script.
+
+javaGradleBuildPipelineDeb {
+    branch = 'master'   					- the branch you’re deploying.
+    scmUrl = 'git@bitbucket.org:swigy/gandalf.git'      - repo url.
+    distId = 'gandalf-1.0.0-SNAPSHOT'	            - the jar name (inside build/libs)
+    artifactId = 'gandalf' 			            - the <service-name>
+    distPath = 'build/libs'
+}
+For maven projects - 
+
+javaMavenBuildPipeline {
+branch = 'master’
+scmUrl = 'git@bitbucket.org:swigy/<servicename>.git'
+distId = 'servicename-1.0.0-SNAPSHOT'
+artifactId = 'servicename'
+distPath = 'target/'
+}
+
+
+Apply & Save. - We now have a build pipeline for our project.
+
+Launch - Instances
+Note- This is needed only for the first time we want to launch instances.
+Go to Jenkins home page -> launch tab -> launch-instances-v1 -> Build with Parameters. 
+
+service_name - This should be <service-name>. Once the build is complete (prev. step), take the build version from console output, and paste it here. 
+pod - This should be ff (We’ll get deployment notifications in #deploy-<pod> channel)
+instance_count - No. of instances you want. 
+The instance names in EC2 would be in the format: <pod>-<environment>-<service-name>-<instance_number>
+
+
+Deploy - Job for Service
+Partial Deploy - http://jenkins.swiggy.co:8080/view/deploy/job/partial-deploy-v1/
+We need the <service-name>, build version, and a host name for this. The code will be deployed on that host, and will be taken out of rotation in Kong. 
+
+Full Deploy - Once testing/sanity is done on the above host, go to http://jenkins.swiggy.co:8080/view/deploy/job/deploy-v1/ for full deployment. 
+
+
+Adding Service to Kong
+When instances are launched, they are added as Upstream in Kong. Find your service under <service-name> here: http://kingkong.swiggyops.de/upstreams
+
+Now, we need to add the service definition, routes, relevant plugins in Kong. Open http://kingkong.swiggyops.de/services - Click Add Service - Name is <service-name>, Host is Upstream Server name. Reduce the timeouts to a meaningful number, and save. 
+Next, we need to add Routes - 
+Plugins - Add prometheus.
+
+Done. 
+
+SSH Access 
+If you need SSH access to boxes, use can use the job: http://jenkins.swiggy.co:8080/view/ssh-access/job/ssh-access/
+
+To give you ssh access to any production box,
+Click on “Build With Parameters” on left panel. And then provide the required list of comma separated machine names(e.g. ff-prod-fraud-detection-service-1.swiggy.prod,ff-prod-fraud-detection-service.swiggy.prod) and your ssh public key (~/.ssh/id_rsa.pub). Click on Build.
+
+Common Use-cases
+Listing down the high level steps for some common use-cases.
+
+Feature Release: Merge to master, Build, Deploy
+Change value of a config (eg. a timeout value) without any code change -> Change config value Consul, use: http://jenkins.swiggy.co:8080/view/restart/job/restart-config-v1/ to restart the apps to reflect the config.
+Reverting a release: Use prev. build version (which is stable), and then partial deploy/ full deploy. 
+Rolling Restart a service (eg. possibly a memory leak etc. ) - Use http://jenkins.swiggy.co:8080/view/restart/job/restart-v1/
+What to do when you get this error: Another deployment is in progress in partial deploy job. 
+Need to abort the same with <servicename> used above and run this pipeline: http://jenkins.swiggy.co:8080/job/abort-deploy-v1/.
+
